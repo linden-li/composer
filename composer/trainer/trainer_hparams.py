@@ -449,7 +449,8 @@ class TrainerHparams(hp.Hparams):
         )
 
         # Optimizers
-        optimizers = self.optimizers.initialize_object(model.parameters()) if self.optimizers is not None else None
+        #optimizers = self.optimizers.initialize_object(model.parameters()) if self.optimizers is not None else None
+        optimizers = None
 
         load_object_store = None
         if self.load_object_store is not None and self.load_logger_destination is not None:

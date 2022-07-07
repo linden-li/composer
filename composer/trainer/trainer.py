@@ -771,6 +771,17 @@ class Trainer:
 
         _validate_precision(precision, self._device, deepspeed_enabled)
 
+#        self._original_model = model
+
+        # move to device and wrap here
+        model = self._device.module_to_device(model)
+
+        if dist.get_world_size() > 1:
+            # Only wrap the module if required
+            model = prepare_ddp_module(model, False) # false right now to make it happy
+        
+        self._original_model = model
+
         # optimizers and schedulers
         if not optimizers:
             optimizers = DecoupledSGDW(list(model.parameters()), lr=0.1)
@@ -890,8 +901,7 @@ class Trainer:
 
         self.logger.data_fit({'rank_zero_seed': rank_zero_seed})
 
-        assert isinstance(self.state.model, ComposerModel)
-        self._original_model = self.state.model
+        #assert isinstance(self.state.model, ComposerModel)
 
         # Schedulers
         self.state.schedulers = _compile_schedulers(schedulers, self.state, scale_schedule_ratio)
@@ -983,6 +993,10 @@ class Trainer:
                     f'Found latest checkpoint at {latest_checkpoint_path}, loading instead of load_path {load_path} as autoresume enabled.'
                 )
         # Actually load the checkpoint from potentially updated arguments
+        print("Model: ")
+        print(self.state.model)
+        print("Optimizers: ")
+        print(self.state.optimizers)
         if load_path is not None:
             self._rng_state = load_checkpoint(
                 state=self.state,
@@ -999,23 +1013,18 @@ class Trainer:
             reproducibility.seed_all(self.state.seed)
 
         # Move the model and optimizers to the specified device
-        if not self.deepspeed_enabled:
-            host_model_params = self.state.model.parameters()
-            self.state.model = self._device.module_to_device(self.state.model)
-            device_model_params = self.state.model.parameters()
+        # if not self.deepspeed_enabled:
+            # host_model_params = self.state.model.parameters()
+            # device_model_params = self.state.model.parameters()
 
             # use surgery to update the parameters of the optimizers, now that the model is on the device
             # see https://pytorch.org/docs/stable/optim.html#constructing-it
-            module_surgery.replace_params_in_optimizer(old_params=host_model_params,
-                                                       new_params=device_model_params,
-                                                       optimizers=self.state.optimizers)
+            # module_surgery.replace_params_in_optimizer(old_params=host_model_params,
+                                                    #    new_params=device_model_params,
+                                                    #    optimizers=self.state.optimizers)
 
             # Move any remaining optimizer parameters onto the device
-            self.state.optimizers = map_collection(self.state.optimizers, self._device.optimizer_to_device)
-
-            if dist.get_world_size() > 1:
-                # Only wrap the module if required
-                self.state.model = prepare_ddp_module(self.state.model, self._find_unused_parameters)
+            # self.state.optimizers = map_collection(self.state.optimizers, self._device.optimizer_to_device)
 
     @property
     def deepspeed_enabled(self):
@@ -1968,7 +1977,8 @@ class Trainer:
                 self.engine.run_event(Event.EVAL_BATCH_START)
 
                 self.engine.run_event(Event.EVAL_BEFORE_FORWARD)
-                self.state.outputs, targets = self._original_model.validate(self.state.batch)
+                print (self.state.batch)
+                self.state.outputs, targets = self.state.model.validate(self.state.batch)
                 self.engine.run_event(Event.EVAL_AFTER_FORWARD)
 
                 metrics.update(self.state.outputs, targets)

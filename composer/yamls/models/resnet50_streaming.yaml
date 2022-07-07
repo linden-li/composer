@@ -2,8 +2,8 @@ train_dataset:
   streaming_imagenet1k:
     remote: s3://mosaicml-internal-dataset-imagenet1k/mds/1/
     local: /tmp/mds-cache/mds-imagenet1k/
-    split: train
-    resize_size: -1
+    split: val
+    resize_size: 256
     crop_size: 224
     shuffle: true
     drop_last: true
@@ -34,8 +34,8 @@ model:
       - bn_uniform
     num_classes: 1000
 max_duration: 90ep
-train_batch_size: 2048
-eval_batch_size: 2048
+train_batch_size: 256
+eval_batch_size: 128
 seed: 17
 dataloader:
   pin_memory: true
@@ -44,3 +44,4 @@ dataloader:
   persistent_workers: true
   num_workers: 8
 grad_accum: 1
+precision: fp32

@@ -8,6 +8,8 @@ from typing import Callable, ContextManager, Union, cast
 
 import torch.nn
 from torch.nn.parallel import DistributedDataParallel
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+#from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 
 from composer.core.state import State
 from composer.utils import dist
@@ -103,7 +105,8 @@ def prepare_ddp_module(module: torch.nn.Module, find_unused_parameters: bool) ->
     """
     if dist.is_available() and dist.is_initialized():
         if any((p.requires_grad for p in module.parameters())):
-            ddp_model = DistributedDataParallel(module, find_unused_parameters=find_unused_parameters)
+            #ddp_model = DistributedDataParallel(module, find_unused_parameters=find_unused_parameters)
+            ddp_model = FSDP(module)
             return ddp_model
         return module
     if dist.is_available():
