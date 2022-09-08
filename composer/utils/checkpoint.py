@@ -17,7 +17,10 @@ import textwrap
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
+
 import torch
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 
 from composer.utils import dist, reproducibility
 from composer.utils.file_helpers import (FORMAT_NAME_WITH_DIST_AND_TIME_TABLE, format_name_with_dist_and_time, get_file,
@@ -34,7 +37,9 @@ log = logging.getLogger(__name__)
 __all__ = ['load_checkpoint', 'save_checkpoint', 'download_checkpoint']
 
 _COMPOSER_STATES_FILENAME = 'composer_states.pt'
-_DEEPSPEED_TAG = 'deepspeed'  # always tag with the same, deterministic name. We'll rename the tarball to the appropriate name.
+# always tag with the same, deterministic name. We'll rename the tarball to the appropriate name.
+_DEEPSPEED_TAG = 'deepspeed'
+_FSDP_TAG = 'fsdp'
 
 
 def _format_path_with_rank_zero(path: str) -> str:
@@ -153,10 +158,12 @@ def load_checkpoint(
     """
     # download the checkpoint to the node-local folder
     log.debug('Loading checkpoint at %s', path)
-    tempdir_ctx = tempfile.TemporaryDirectory() if dist.get_local_rank() == 0 else contextlib.nullcontext(None)
+    tempdir_ctx = tempfile.TemporaryDirectory(
+    ) if dist.get_local_rank() == 0 else contextlib.nullcontext(None)
     with tempdir_ctx as tempdir:
         try:
-            node_checkpoint_folder = _get_node_checkpoint_download_folder(tempdir)
+            node_checkpoint_folder = _get_node_checkpoint_download_folder(
+                tempdir)
             composer_states_filepath, extracted_checkpoint_folder, extracted_rank_n = download_checkpoint(
                 path=path,
                 node_checkpoint_folder=node_checkpoint_folder,
@@ -177,7 +184,8 @@ def load_checkpoint(
             # be a shared resource between nodes.
             dist.barrier()
 
-    log.info('%s loaded from %s', 'Model weights' if load_weights_only else 'Trainer checkpoint', path)
+    log.info('%s loaded from %s',
+             'Model weights' if load_weights_only else 'Trainer checkpoint', path)
     return rng_state_dicts
 
 
@@ -208,13 +216,17 @@ def download_checkpoint(
         rank greater than 0.
     """
     log.debug('Downloading checkpoint to folder %s', node_checkpoint_folder)
-    rank_zero_checkpoint_filepath = os.path.join(node_checkpoint_folder, 'rank0_checkpoint')
-    rank_n_checkpoint_filepath = os.path.join(node_checkpoint_folder, f'rank{dist.get_global_rank()}_checkpoint')
+    rank_zero_checkpoint_filepath = os.path.join(
+        node_checkpoint_folder, 'rank0_checkpoint')
+    rank_n_checkpoint_filepath = os.path.join(
+        node_checkpoint_folder, f'rank{dist.get_global_rank()}_checkpoint')
     extracted_checkpoint_folder = None
     extracted_rank_n = False
     if is_tar(path):
-        extracted_checkpoint_folder = os.path.join(node_checkpoint_folder, 'checkpoint')
-        composer_states_filepath = os.path.join(extracted_checkpoint_folder, _COMPOSER_STATES_FILENAME)
+        extracted_checkpoint_folder = os.path.join(
+            node_checkpoint_folder, 'checkpoint')
+        composer_states_filepath = os.path.join(
+            extracted_checkpoint_folder, _COMPOSER_STATES_FILENAME)
     else:
         # it's not an archive; it's just the composer state dict
         # and only rank zero has this file
@@ -335,7 +347,8 @@ def glob_filter(exclude_globs: List[str]) -> Callable[[Dict], None]:
         filtered_paths = list(set(filtered_paths))
         filtered_paths_str = ', '.join(filtered_paths)
         if filtered_paths:
-            log.info(f'Ignoring the following paths from the loaded checkpoint state_dict: {filtered_paths_str}')
+            log.info(
+                f'Ignoring the following paths from the loaded checkpoint state_dict: {filtered_paths_str}')
 
         # Loop through all paths to exclude
         paths_to_remove = [path.split('/') for path in filtered_paths]
@@ -362,15 +375,18 @@ def _restore_checkpoint(
             ignore_keys = glob_filter(ignore_keys)
         # Call function to modify state_dict
         ignore_keys(state_dict)
-    log.debug(f"Loaded checkpoint with keys {state_dict.keys()} and state keys {state_dict['state'].keys()}")
+    log.debug(
+        f"Loaded checkpoint with keys {state_dict.keys()} and state keys {state_dict['state'].keys()}")
 
     if is_model_deepspeed(state.model):
         if extracted_checkpoint_folder is None:
-            raise RuntimeError('Deepspeed checkpoints require a tarball, not a weights file.')
+            raise RuntimeError(
+                'Deepspeed checkpoints require a tarball, not a weights file.')
 
         global_rank = dist.get_global_rank()
         if global_rank > 0 and not extracted_rank_n:
-            raise RuntimeError(f'Deepspeed checkpoint missing for rank {global_rank}')
+            raise RuntimeError(
+                f'Deepspeed checkpoint missing for rank {global_rank}')
 
         load_path, _ = state.deepspeed_model.load_checkpoint(
             extracted_checkpoint_folder,
@@ -381,7 +397,8 @@ def _restore_checkpoint(
         if load_path is None:
             raise RuntimeError(f'Failed to load DeepSpeed checkpoint')
     elif load_weights_only:
-        state.load_model_state(state_dict['state'], strict=strict_model_weights)
+        state.load_model_state(
+            state_dict['state'], strict=strict_model_weights)
 
     if not load_weights_only:
         state.load_state_dict(state_dict['state'])
@@ -402,13 +419,27 @@ def save_checkpoint(
     if weights_only and not is_model_deepspeed(state.model):
         state_dict['state'] = {'model': state_dict['state']['model']}
 
-    checkpoint_filepath = format_name_with_dist_and_time(filename, state.run_name, state.timestamp)
+    checkpoint_filepath = format_name_with_dist_and_time(
+        filename, state.run_name, state.timestamp)
     if is_model_deepspeed(state.model) and not is_tar(checkpoint_filepath):
         # Deepspeed requires tarballs; appending `.tar`
         checkpoint_filepath += '.tar'
 
+    if isinstance(state.model, FSDP):
+        full_state_dict_config = FullStateDictConfig(
+            offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(state.model, StateDictType.FULL_STATE_DICT, full_state_dict_config):
+            full_fsdp_state_dict = state.model.state_dict()
+
+            if dist.get_global_rank() == 0:
+                assert full_fsdp_state_dict
+                log.info("Saving full FSDP state dict")
+                torch.save(full_fsdp_state_dict,
+                           checkpoint_filepath + _FSDP_TAG)
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        composer_states_filepath = os.path.join(tmpdir, _COMPOSER_STATES_FILENAME)
+        composer_states_filepath = os.path.join(
+            tmpdir, _COMPOSER_STATES_FILENAME)
         if dist.get_global_rank() == 0:
             # Only rank zero saves the composer state dict
             with open(composer_states_filepath, 'xb') as f:
